@@ -189,18 +189,22 @@ function humanSneak() {
 // Slot inventory PLAYER trong window đang mở (GUI có bất kỳ kích thước)
 // guiSize = số slot của GUI (thường 54 cho double chest, 27 cho single, v.v.)
 function getPlayerInventorySlotsInWindow(guiSize) {
-  const invStart = guiSize;       
-  const hotbarStart = guiSize + 27; 
+  // Sau GUI slots: 27 ô inventory + 9 ô hotbar
+  const invStart = guiSize;       // slot đầu inventory chính
+  const hotbarStart = guiSize + 27; // slot đầu hotbar
 
   const slots = [];
-  // Inventory chính
+
+  // Inventory chính (không phải hotbar)
   for (let i = invStart; i < invStart + 27; i++) {
     slots.push(i);
   }
-  // Hotbar — BỎ QUA slot 0,1,2 (slot 81,82,83)
+
+  // Hotbar — BỎ QUA slot 0,1,2 (phím 1,2,3)
   for (let i = hotbarStart + 3; i < hotbarStart + 9; i++) {
     slots.push(i);
   }
+
   return slots;
 }
 
@@ -282,52 +286,73 @@ function findSellButtonSlot(window, guiSize) {
 }
 
 async function autoSell(currentBot) {
-  if (autoSellRunning) return;
+  if (autoSellRunning) {
+    log("⚠️ AutoSell đang chạy rồi, bỏ qua");
+    return;
+  }
   autoSellRunning = true;
-  log("🚀 AutoSell TĂNG TỐC bắt đầu vòng lặp...");
+  log("🚀 AutoSell bắt đầu vòng lặp...");
 
   while (!isStoppedPermanently && bot === currentBot) {
     try {
-      // ── 1. CHỜ 3-7 GIÂY (ĐÚNG YÊU CẦU) ──
-      const waitMs = 3000 + Math.random() * 4000; 
+      // ── 1. Chờ ngẫu nhiên 12-18 giây giữa các lần sell ──
+      const waitMs = 12000 + Math.random() * 6000;
       log(`⏳ Chờ ${(waitMs / 1000).toFixed(1)}s trước lần sell tiếp theo...`);
       await sleep(waitMs);
 
       if (isStoppedPermanently || bot !== currentBot) break;
 
-      // ── 2. CHECK ĐỒ ──
+      // ── 2. Kiểm tra xem có item nào cần bán không (bỏ hotbar 0,1,2) ──
       const allItems = currentBot.inventory.items();
+      // items() trả về items với slot theo inventory thường (slot 36-44 = hotbar)
+      // Bỏ hotbar slot 36, 37, 38 (tương ứng phím 1, 2, 3)
       const itemsToSell = allItems.filter((item) => {
+        // hotbar slot trong inventory window (không có GUI): 36,37,38,...,44
         if (item.slot === 36 || item.slot === 37 || item.slot === 38) return false;
         return true;
       });
 
-      if (itemsToSell.length === 0) continue;
-      log(`🎒 Có ${itemsToSell.length} loại item cần bán`);
-
-      // ── 3. GỬI /sell ──
-      currentBot.chat("/sell");
-
-      // ── 4. CHỜ GUI (Tối đa 4s) ──
-      let sellWindow;
-      try {
-        sellWindow = await new Promise((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error("Timeout GUI")), 4000);
-          currentBot.once("windowOpen", (w) => { clearTimeout(timer); resolve(w); });
-        });
-      } catch (e) {
-        currentBot.chat("/sell all"); // Fallback nếu lỗi
-        await sleep(2000);
+      if (itemsToSell.length === 0) {
+        log("📭 Không có item nào để bán (bỏ qua lần này)");
         continue;
       }
 
-      log(`📦 GUI Sell mở! (54 slots)`);
-      await sleep(300); 
+      log(`🎒 Có ${itemsToSell.length} loại item cần bán`);
 
-      const guiSize = 54; // Dựa trên hình ảnh bạn gửi (DonutSMP chuẩn 54 slot)
+      // ── 3. Gửi lệnh /sell ──
+      log("💬 Gửi lệnh /sell...");
+      currentBot.chat("/sell");
+
+      // ── 4. Chờ GUI mở (tối đa 8 giây) ──
+      let sellWindow;
+      try {
+        sellWindow = await new Promise((resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error("GUI không mở sau 8s — server có thể không hỗ trợ /sell GUI")),
+            8000
+          );
+          currentBot.once("windowOpen", (w) => {
+            clearTimeout(timer);
+            resolve(w);
+          });
+        });
+      } catch (e) {
+        log(`⚠️ ${e.message}`);
+        log("💡 Thử fallback: /sell all");
+        currentBot.chat("/sell all");
+        await sleep(3000);
+        continue;
+      }
+
+      log(`📦 GUI Sell mở! Kích thước: ${sellWindow.slots.length} slots`);
+      await sleep(600); // Chờ GUI render xong
+
+      const guiSize = sellWindow.slots.length - 36; // GUI slot count (tổng - 36 player slots)
       const playerSlots = getPlayerInventorySlotsInWindow(guiSize);
 
-      // ── 5. BULK SHIFT-CLICK (MOVE TỪNG Ô NHƯNG TĂNG TỐC) ──
+      log(`📋 Sẽ move item từ ${playerSlots.length} slot (bỏ hotbar 1,2,3)`);
+
+      // ── 5. Shift+click từng item từ inventory vào GUI ──
       let moved = 0;
       for (const slotIndex of playerSlots) {
         if (isStoppedPermanently || bot !== currentBot) break;
@@ -336,39 +361,61 @@ async function autoSell(currentBot) {
         if (!item) continue;
 
         try {
+          // mode=1 (shift-click) tự động move toàn bộ stack sang GUI
           await currentBot.clickWindow(slotIndex, 0, 1);
+          log(`  ↳ Shift-click slot ${slotIndex}: ${item.name} x${item.count}`);
           moved++;
-          // ✅ Giảm delay xuống cực thấp: 40ms ~ 60ms (Rất nhanh)
-          await sleep(40 + Math.random() * 20); 
-        } catch (e) {}
+          await sleep(120 + Math.random() * 80); // Giả lập người thật
+        } catch (e) {
+          log(`  ⚠️ Lỗi click slot ${slotIndex} (${item.name}): ${e.message}`);
+        }
       }
-      log(`✅ Đã move ${moved} stack vào GUI`);
 
-      // ── 6. BẤM NÚT SELL TẠI SLOT 53 (CỐ ĐỊNH DỰA TRÊN ẢNH) ──
-      // Dựa trên hình bạn gửi, nút bán chính xác là slot 53
-      const SELL_SLOT = 53; 
-      log(`🖱️ Click nút Sell tại slot ${SELL_SLOT}...`);
-      
+      log(`✅ Đã move ${moved} stack vào GUI`);
+      await sleep(500);
+
+      // ── 6. Tìm và click nút Sell ──
+      // Refresh window sau khi move
+      const currentWindow = currentBot.currentWindow;
+      if (!currentWindow) {
+        log("⚠️ GUI đã đóng trước khi kịp click Sell");
+        continue;
+      }
+
+      const sellSlot = findSellButtonSlot(currentWindow, guiSize);
+      if (sellSlot === null) {
+        log("⚠️ Không tìm được nút Sell! Log tất cả slot của GUI để debug:");
+        for (let i = 0; i < Math.min(currentWindow.slots.length, guiSize); i++) {
+          const it = currentWindow.slots[i];
+          if (it) log(`  Slot ${i}: ${it.name} | displayName: ${it.displayName || "?"}`);
+        }
+        currentBot.closeWindow(currentWindow);
+        continue;
+      }
+
+      log(`🖱️ Click nút Sell tại slot ${sellSlot}...`);
       try {
-        await currentBot.clickWindow(SELL_SLOT, 0, 0);
-        await sleep(600); // Chờ server xử lý xong
+        await currentBot.clickWindow(sellSlot, 0, 0);
       } catch (e) {
         log(`⚠️ Lỗi click nút Sell: ${e.message}`);
       }
 
-      // ── 7. ĐÓNG GUI ──
+      await sleep(1000);
+
+      // ── 7. Đóng GUI ──
       try {
         if (currentBot.currentWindow) {
           currentBot.closeWindow(currentBot.currentWindow);
         }
       } catch (_) {}
 
-      log("✅ AutoSell Tăng tốc hoàn thành chu kỳ!");
-
+      log("✅ AutoSell hoàn thành một chu kỳ!");
     } catch (e) {
-      log(`❌ AutoSell lỗi: ${e.message}`);
-      try { if (currentBot.currentWindow) currentBot.closeWindow(currentBot.currentWindow); } catch (_) {}
-      await sleep(3000);
+      log(`❌ AutoSell lỗi nghiêm trọng: ${e.message}`);
+      try {
+        if (currentBot.currentWindow) currentBot.closeWindow(currentBot.currentWindow);
+      } catch (_) {}
+      await sleep(15000);
     }
   }
 
