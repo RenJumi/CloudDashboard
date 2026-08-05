@@ -163,212 +163,129 @@ function humanSneak() {
 }
 
 // ==========================================
-// AUTOSELL - VIẾT LẠI HOÀN TOÀN
+// AUTOSELL - CHIẾN THUẬT HYBRID (SPEED 2s)
 // ==========================================
 
-/**
- * Slot mapping trong Minecraft inventory (mineflayer):
- *
- * Window slots khi GUI đang mở (ví dụ GUI sell có 54 slots):
- *   - Slot 0..53  : các ô trong GUI (chest/sell UI)
- *   - Slot 54..80 : inventory của player (9 hàng trên, không tính hotbar)
- *   - Slot 81..89 : hotbar (slot 81=hotbar[0], ..., slot 89=hotbar[8])
- *
- * Hotbar slot 0,1,2 (bấm phím 1,2,3) = window slot 81,82,83 → BỎ QUA
- *
- * Khi KHÔNG có GUI (inventory thường):
- *   - slot 36..44 = hotbar[0..8]  → bỏ slot 36,37,38 (phím 1,2,3)
- *   - slot 9..35  = inventory chính
- *
- * Chiến lược: dùng shift+click (button=1, mode=1) để move item nhanh vào GUI.
- * Mineflayer clickWindow(slot, button, mode):
- *   - mode=0, button=0 → left click bình thường
- *   - mode=1, button=0 → shift + left click (move toàn bộ stack)
- */
-
-// Slot inventory PLAYER trong window đang mở (GUI có bất kỳ kích thước)
-// guiSize = số slot của GUI (thường 54 cho double chest, 27 cho single, v.v.)
-function getPlayerInventorySlotsInWindow(guiSize) {
-  const invStart = guiSize;       
-  const hotbarStart = guiSize + 27; 
-
-  const slots = [];
-  // Inventory chính
-  for (let i = invStart; i < invStart + 27; i++) {
-    slots.push(i);
-  }
-  // Hotbar — BỎ QUA slot 0,1,2 (slot 81,82,83)
-  for (let i = hotbarStart + 3; i < hotbarStart + 9; i++) {
-    slots.push(i);
-  }
-  return slots;
+// Lấy danh sách slot của Player Inventory trong GUI (Dựa trên Donut GUI 54 slot)
+function getPlayerSlotsForDonut() {
+    const slots = [];
+    // Inventory chính (27 slot)
+    for (let i = 54; i < 81; i++) slots.push(i);
+    // Hotbar (Bỏ qua 3 slot đầu: 81, 82, 83)
+    for (let i = 84; i < 90; i++) slots.push(i);
+    return slots;
 }
 
-// Lấy display name string từ item (customName là NBT object trong mineflayer)
-function getItemDisplayName(item) {
-  if (!item) return "";
-  try {
-    // customName là nbt object: { type: 'compound', value: { text: { value: '...' } } }
-    // hoặc JSON string tùy version
-    if (item.customName) {
-      if (typeof item.customName === "string") {
-        // Có thể là JSON text component
-        try {
-          const parsed = JSON.parse(item.customName);
-          return (parsed.text || parsed.translate || JSON.stringify(parsed)).toLowerCase();
-        } catch (_) {
-          return item.customName.toLowerCase();
+// Hàm tìm nút bán (Vẫn giữ logic scan)
+function findSellButton(window, maxGuiSlots) {
+    if (maxGuiSlots > 53) {
+        const item53 = window.slots[53];
+        if (item53 && (item53.name?.includes("lime") || item53.displayName?.toLowerCase().includes("sell"))) {
+            return 53;
         }
-      }
-      // NBT object — thử lấy value đệ quy
-      if (typeof item.customName === "object") {
-        const str = JSON.stringify(item.customName);
-        return str.toLowerCase();
-      }
     }
-    // displayName thường là plain string an toàn
-    if (item.displayName && typeof item.displayName === "string") {
-      return item.displayName.toLowerCase();
+    for (let i = maxGuiSlots - 1; i >= 0; i--) {
+        const item = window.slots[i];
+        if (item) {
+            const name = (item.displayName || item.name || "").toLowerCase();
+            if (name.includes("sell") || name.includes("bán") || name.includes("lime")) {
+                return i;
+            }
+        }
     }
-    return (item.name || "").toLowerCase();
-  } catch (_) {
-    return (item.name || "").toLowerCase();
-  }
-}
-
-// Tìm slot của nút Sell trong GUI
-function findSellButtonSlot(window, guiSize) {
-  // Ảnh GUI cho thấy: GUI 54 slot (6 hàng x 9), nút Sell ở slot 53 (góc dưới phải)
-  // Thử slot cố định trước cho nhanh
-  const PRIMARY_SELL_SLOTS = [53, 49, 44, 45, 40, 26, 8];
-  for (const s of PRIMARY_SELL_SLOTS) {
-    if (s >= guiSize) continue; // Chỉ xét slot trong GUI, không phải inventory player
-    const item = window.slots[s];
-    if (!item) continue;
-    const name = getItemDisplayName(item);
-    if (
-      name.includes("sell") ||
-      name.includes("bán") ||
-      name.includes("click to sell") ||
-      name.includes("confirm") ||
-      name.includes("xác nhận") ||
-      name.includes("lime") // lime_stained_glass_pane = nút xanh lá trong ảnh
-    ) {
-      log(`🔍 Tìm thấy nút Sell tại slot ${s}: "${item.name}" | name: "${name}"`);
-      return s;
-    }
-  }
-
-  // Fallback: scan toàn bộ GUI, tìm lime_stained_glass_pane hoặc keyword
-  for (let i = 0; i < guiSize; i++) {
-    const item = window.slots[i];
-    if (!item) continue;
-    const name = getItemDisplayName(item);
-    const itemName = (item.name || "").toLowerCase();
-    if (
-      itemName.includes("lime_stained_glass") ||
-      name.includes("sell") ||
-      name.includes("click to sell") ||
-      name.includes("6.9k") || name.includes("$")
-    ) {
-      log(`🔍 Scan tìm thấy nút Sell tại slot ${i}: "${item.name}"`);
-      return i;
-    }
-  }
-
-  // Hardcode slot 53 làm last resort (dựa trên ảnh GUI bạn cung cấp)
-  log(`⚠️ Không scan được nút Sell — hardcode slot 53 (dựa trên ảnh GUI)`);
-  return 53;
+    return maxGuiSlots - 1;
 }
 
 async function autoSell(currentBot) {
   if (autoSellRunning) return;
   autoSellRunning = true;
-  log("🚀 AutoSell TĂNG TỐC bắt đầu vòng lặp...");
+  log("🚀 AutoSell Hybrid (Speed 2s) bắt đầu...");
 
   while (!isStoppedPermanently && bot === currentBot) {
     try {
-      // ── 1. CHỜ 3-7 GIÂY (ĐÚNG YÊU CẦU) ──
-      const waitMs = 3000 + Math.random() * 4000; 
-      log(`⏳ Chờ ${(waitMs / 1000).toFixed(1)}s trước lần sell tiếp theo...`);
+      // ── 1. DELAY 2.0s - 2.5s (Tốc độ 2 giây) ──
+      const waitMs = 2000 + Math.random() * 500; 
+      log(`⏳ Chờ ${(waitMs / 1000).toFixed(1)}s (Speed 2s)`);
       await sleep(waitMs);
 
       if (isStoppedPermanently || bot !== currentBot) break;
 
-      // ── 2. CHECK ĐỒ ──
-      const allItems = currentBot.inventory.items();
-      const itemsToSell = allItems.filter((item) => {
-        if (item.slot === 36 || item.slot === 37 || item.slot === 38) return false;
-        return true;
+      // Kiểm tra đồ
+      const itemsToSell = currentBot.inventory.items().filter((item) => {
+        return item.slot !== 36 && item.slot !== 37 && item.slot !== 38;
       });
 
       if (itemsToSell.length === 0) continue;
-      log(`🎒 Có ${itemsToSell.length} loại item cần bán`);
+      log(`🎒 Có ${itemsToSell.length} stack cần bán`);
 
-      // ── 3. GỬI /sell ──
+      // Gửi lệnh
       currentBot.chat("/sell");
 
-      // ── 4. CHỜ GUI (Tối đa 4s) ──
+      // Chờ GUI mở (Tối đa 3 giây, nếu nhanh thì càng tốt)
       let sellWindow;
       try {
         sellWindow = await new Promise((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error("Timeout GUI")), 4000);
+          const timer = setTimeout(() => reject(new Error("Timeout GUI")), 3000);
           currentBot.once("windowOpen", (w) => { clearTimeout(timer); resolve(w); });
         });
       } catch (e) {
-        currentBot.chat("/sell all"); // Fallback nếu lỗi
-        await sleep(2000);
+        currentBot.chat("/sell all");
+        await sleep(1000);
         continue;
       }
 
-      log(`📦 GUI Sell mở! (54 slots)`);
-      await sleep(300); 
+      // Rút ngắn thời gian chờ render xuống 100ms (Thay vì 200ms)
+      await sleep(100); 
 
-      const guiSize = 54; // Dựa trên hình ảnh bạn gửi (DonutSMP chuẩn 54 slot)
-      const playerSlots = getPlayerInventorySlotsInWindow(guiSize);
-
-      // ── 5. BULK SHIFT-CLICK (MOVE TỪNG Ô NHƯNG TĂNG TỐC) ──
+      // Lấy danh sách slot của Player 
+      const playerSlots = getPlayerSlotsForDonut();
+      
+      // Shift-click từng slot (Cực nhanh)
       let moved = 0;
       for (const slotIndex of playerSlots) {
         if (isStoppedPermanently || bot !== currentBot) break;
 
         const item = sellWindow.slots[slotIndex];
-        if (!item) continue;
+        if (!item) continue; 
 
         try {
           await currentBot.clickWindow(slotIndex, 0, 1);
           moved++;
-          // ✅ Giảm delay xuống cực thấp: 40ms ~ 60ms (Rất nhanh)
-          await sleep(40 + Math.random() * 20); 
+          // GIẢM DELAY CLICK xuống 15ms - 25ms
+          await sleep(15 + Math.random() * 10); 
         } catch (e) {}
       }
-      log(`✅ Đã move ${moved} stack vào GUI`);
 
-      // ── 6. BẤM NÚT SELL TẠI SLOT 53 (CỐ ĐỊNH DỰA TRÊN ẢNH) ──
-      // Dựa trên hình bạn gửi, nút bán chính xác là slot 53
-      const SELL_SLOT = 53; 
-      log(`🖱️ Click nút Sell tại slot ${SELL_SLOT}...`);
+      if (moved === 0) {
+          log("⚠️ Không move được stack nào, đóng GUI và thử lại...");
+          try { if (currentBot.currentWindow) currentBot.closeWindow(currentBot.currentWindow); } catch (_) {}
+          continue;
+      }
+
+      log(`✅ Đã move ${moved}/${itemsToSell.length} stack vào GUI`);
+
+      // Tìm và bấm nút bán
+      const sellSlot = findSellButton(sellWindow, 54);
+      log(`🖱️ Click nút Sell tại slot ${sellSlot}`);
       
       try {
-        await currentBot.clickWindow(SELL_SLOT, 0, 0);
-        await sleep(600); // Chờ server xử lý xong
+        await currentBot.clickWindow(sellSlot, 0, 0);
+        await sleep(400); // Chờ server xác nhận tiền
       } catch (e) {
         log(`⚠️ Lỗi click nút Sell: ${e.message}`);
       }
 
-      // ── 7. ĐÓNG GUI ──
+      // Đóng GUI
       try {
-        if (currentBot.currentWindow) {
-          currentBot.closeWindow(currentBot.currentWindow);
-        }
+        if (currentBot.currentWindow) currentBot.closeWindow(currentBot.currentWindow);
       } catch (_) {}
 
-      log("✅ AutoSell Tăng tốc hoàn thành chu kỳ!");
+      log(`✅ Hoàn thành! ${moved} stack đã được bán.`);
 
     } catch (e) {
       log(`❌ AutoSell lỗi: ${e.message}`);
       try { if (currentBot.currentWindow) currentBot.closeWindow(currentBot.currentWindow); } catch (_) {}
-      await sleep(3000);
+      await sleep(2000);
     }
   }
 
