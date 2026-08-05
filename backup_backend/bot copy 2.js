@@ -40,7 +40,7 @@ server.listen(PORT, () => {
 // DonutSMP dùng Velocity proxy — chấp nhận mọi version 1.20+
 // Thử lần lượt các version nếu bị reject
 // ==========================================
-const VERSIONS_TO_TRY = ["1.21.4", "1.21.1", "1.20.4", "1.20.1"];
+const VERSIONS_TO_TRY = ["1.21.1"];
 let versionIndex = 0;
 
 function getCurrentVersion() {
