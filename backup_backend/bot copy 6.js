@@ -2,7 +2,6 @@ const express = require("express");
 const http = require("http");
 const socketIo = require("socket.io");
 const mineflayer = require("mineflayer");
-const fs = require('fs'); 
 const {
   pathfinder,
   Movements,
@@ -388,8 +387,6 @@ function setupBotEvents(currentBot) {
     setTimeout(() => {
       if (isStoppedPermanently || bot !== currentBot) return;
 
-      setupPlayerDetection(currentBot);
-
       log("🔁 Khởi động các tính năng nền...");
 
       // Anti-AFK: nhìn xung quanh
@@ -421,7 +418,7 @@ function setupBotEvents(currentBot) {
       autoSell(currentBot);
 
       log("✅ Bot đang chạy nền ổn định");
-    }, 10000);
+    }, 20000);
   });
 
   // ---- HEALTH ----
@@ -549,71 +546,21 @@ function setupBotEvents(currentBot) {
 // ==========================================
 // CHỐNG BAN - PHÁT HIỆN NGƯỜI LẠ & AUTO RTP
 // ==========================================
-const recentTabPlayers = new Map();
+const SAFE_PLAYERS = new Set(); // Whitelist (bỏ qua)
 let rtpCooldown = false;
-const SAFE_FILE = './safe_players.json';
-
-// Load whitelist khi khởi động
-const SAFE_PLAYERS = new Set(
-    fs.existsSync(SAFE_FILE)
-        ? JSON.parse(fs.readFileSync(SAFE_FILE))
-        : ['Kawair_Minecraft']
-);
-
-// Lưu whitelist mỗi khi thay đổi
-function saveSafePlayers() {
-    fs.writeFileSync(SAFE_FILE, JSON.stringify([...SAFE_PLAYERS]));
-}
 
 function setupPlayerDetection(currentBot) {
-
-    // ── CÁCH 1: Theo dõi broadcast message (Staff/Admin) ──
-    currentBot.on('message', (jsonMsg) => {
-        const msg = jsonMsg.toString();
-
-        const suspiciousPatterns = [
-            /staff/i, /moderator/i, /admin/i,
-            /vanish/i, /spectator/i,
-            /\[mod\]/i, /\[admin\]/i, /\[staff\]/i,
-        ];
-
-        const isSuspicious = suspiciousPatterns.some(p => p.test(msg));
-        if (isSuspicious && !msg.includes(currentBot.username)) {
-            log(`🚨 CẢNH BÁO STAFF BROADCAST: ${msg}`);
-            io.emit('alert', { type: 'staff', message: msg });
-
-            if (!rtpCooldown) {
-                rtpCooldown = true;
-                log('🚨 Phát hiện Staff/Mod qua broadcast — RTP + DISCONNECT ngay!');
-
-                try {
-                    if (currentBot.currentWindow) currentBot.closeWindow(currentBot.currentWindow);
-                } catch(_) {}
-
-                currentBot.chat('/rtp');
-                log('📤 Đã gửi /rtp — chờ 2s rồi disconnect...');
-
-                setTimeout(() => {
-                    log('🔌 Đang disconnect do phát hiện Staff...');
-                    try { currentBot.end('Staff detected — safety disconnect'); } catch(_) {}
-                }, 2000);
-
-                setTimeout(() => { rtpCooldown = false; }, 60000);
-            }
-        }
-    });
-
-    // ── CÁCH 2A: Phát hiện qua entitySpawn ──
+    // Theo dõi entity spawn xung quanh
     currentBot.on('entitySpawn', (entity) => {
         if (isStoppedPermanently || bot !== currentBot) return;
         if (entity.type !== 'player') return;
         if (entity.username === currentBot.username) return;
-
+        
         const playerName = entity.username || entity.name || 'Unknown';
-
+        
         // Bỏ qua nếu trong whitelist
         if (SAFE_PLAYERS.has(playerName)) return;
-
+        
         // Tính khoảng cách
         let distance = 999;
         try {
@@ -625,7 +572,9 @@ function setupPlayerDetection(currentBot) {
             }
         } catch(e) {}
 
-        log(`🚨 NGƯỜI LẠ PHÁT HIỆN: "${playerName}" (cách ${Math.round(distance)} block)`);
+        // Cảnh báo
+        const msg = `🚨 NGƯỜI LẠ PHÁT HIỆN: "${playerName}" (cách ${Math.round(distance)} block)`;
+        log(msg);
         io.emit('alert', { type: 'stranger', name: playerName, distance: Math.round(distance) });
 
         // Cập nhật danh sách người lạ lên dashboard
@@ -633,28 +582,31 @@ function setupPlayerDetection(currentBot) {
         botData.strangerLog.unshift({
             name: playerName,
             distance: Math.round(distance),
-            time: new Date().toLocaleTimeString('vi-VN'),
-            type: 'visible'
+            time: new Date().toLocaleTimeString('vi-VN')
         });
         if (botData.strangerLog.length > 20) botData.strangerLog.pop();
 
+        // Auto RTP nếu chưa trong cooldown
         if (!rtpCooldown) {
             rtpCooldown = true;
-            log(`⚡ Đang thoát khỏi "${playerName}" bằng /rtp...`);
-
+            log(`⚡ Đang thoát khỏi ${playerName} bằng /rtp...`);
+            
+            // Đóng GUI nếu đang mở
             try {
                 if (currentBot.currentWindow) currentBot.closeWindow(currentBot.currentWindow);
             } catch(_) {}
 
+            // Gửi /rtp
             currentBot.chat('/rtp');
             log('📤 Đã gửi /rtp — đang dịch chuyển...');
 
+            // Cooldown 30 giây để tránh spam /rtp
             setTimeout(() => {
                 rtpCooldown = false;
                 log('✅ RTP cooldown hết, tiếp tục theo dõi...');
             }, 30000);
         } else {
-            log(`⏳ RTP đang cooldown — bỏ qua "${playerName}"`);
+            log(`⏳ RTP đang cooldown — bỏ qua ${playerName}`);
         }
     });
 
@@ -668,92 +620,7 @@ function setupPlayerDetection(currentBot) {
         }
     });
 
-    // ── CÁCH 2B: Tab list monitor — phát hiện Specter/Invisible ──
-    // ── CÁCH 2B: Tab list monitor — chỉ cảnh báo nếu entity THẬT SỰ gần ──
-const tabInterval = setInterval(() => {
-    if (isStoppedPermanently || bot !== currentBot) {
-        clearInterval(tabInterval);
-        return;
-    }
-
-    const players = Object.values(currentBot.players || {});
-
-    players.forEach(player => {
-        if (!player.username) return;
-        if (player.username === currentBot.username) return;
-        if (SAFE_PLAYERS.has(player.username)) return;
-
-        // Ghi nhận lần đầu thấy trong tab
-        if (!recentTabPlayers.has(player.username)) {
-            recentTabPlayers.set(player.username, Date.now());
-        }
-
-        // Kiểm tra entity có trong render distance không
-        const nearbyEntity = Object.values(currentBot.entities || {})
-            .find(e => e.username === player.username);
-
-        // Nếu KHÔNG thấy entity → player ở server khác hoặc quá xa → BỎ QUA
-        if (!nearbyEntity) return;
-
-        // Tính khoảng cách thực tế
-        let distance = 999;
-        try {
-            if (currentBot.entity && nearbyEntity.position) {
-                const dx = currentBot.entity.position.x - nearbyEntity.position.x;
-                const dy = currentBot.entity.position.y - nearbyEntity.position.y;
-                const dz = currentBot.entity.position.z - nearbyEntity.position.z;
-                distance = Math.sqrt(dx*dx + dy*dy + dz*dz);
-            }
-        } catch(e) {}
-
-        // Chỉ cảnh báo nếu trong 8 chunk = 128 block
-        if (distance > 128) return;
-
-        // Chỉ xử lý nếu mới xuất hiện trong 30 giây
-        const joinedRecently = Date.now() - (recentTabPlayers.get(player.username) || 0) < 30000;
-        if (!joinedRecently) return;
-
-        log(`👻 "${player.username}" nghi ngờ Specter — cách ${Math.round(distance)} block!`);
-        io.emit('alert', {
-            type: 'specter',
-            name: player.username,
-            message: `${player.username} có thể đang dùng Specter Mode`
-        });
-
-        botData.strangerLog = botData.strangerLog || [];
-        botData.strangerLog.unshift({
-            name: player.username,
-            distance: Math.round(distance),
-            time: new Date().toLocaleTimeString('vi-VN'),
-            type: 'specter'
-        });
-        if (botData.strangerLog.length > 20) botData.strangerLog.pop();
-
-        if (!rtpCooldown) {
-            rtpCooldown = true;
-            log(`🚨 Specter gần — RTP ngay khỏi "${player.username}"!`);
-            try {
-                if (currentBot.currentWindow) currentBot.closeWindow(currentBot.currentWindow);
-            } catch(_) {}
-            currentBot.chat('/rtp');
-
-            setTimeout(() => {
-                rtpCooldown = false;
-                log('✅ RTP cooldown hết, tiếp tục theo dõi...');
-            }, 30000);
-        }
-    });
-
-    // Xóa player khỏi map nếu đã rời tab list
-    recentTabPlayers.forEach((_, name) => {
-        const stillInTab = players.some(p => p.username === name);
-        if (!stillInTab) recentTabPlayers.delete(name);
-    });
-
-}, 10000);
-
-    botIntervals.push(tabInterval);
-    log('👁️ Hệ thống phát hiện người lạ + Specter đã bật');
+    log('👁️ Hệ thống phát hiện người lạ đã bật');
 }
 
 // ==========================================
@@ -788,29 +655,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => clearInterval(interval));
-
-  socket.on('addSafePlayer', (name) => {
-        if (!name || typeof name !== 'string') return;
-        const trimmed = name.trim();
-        SAFE_PLAYERS.add(trimmed);
-        saveSafePlayers();
-        log(`✅ Đã thêm "${trimmed}" vào whitelist`);
-        socket.emit('safePlayers', [...SAFE_PLAYERS]);
-    });
-
-    // Xóa safe player
-    socket.on('removeSafePlayer', (name) => {
-        SAFE_PLAYERS.delete(name);
-        saveSafePlayers();
-        log(`🗑️ Đã xóa "${name}" khỏi whitelist`);
-        socket.emit('safePlayers', [...SAFE_PLAYERS]);
-    });
-
-    // Gửi danh sách khi connect
-    socket.emit('safePlayers', [...SAFE_PLAYERS]);
-  
 });
-
 
 // ==========================================
 // KHỞI CHẠY
